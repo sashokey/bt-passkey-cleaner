@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BT Passkey Cleaner
 // @namespace    bt-passkey-cleaner
-// @version      1.0.3
+// @version      1.0.4
 // @homepageURL  https://github.com/sashokey/bt-passkey-cleaner
 // @updateURL    https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
@@ -9,7 +9,6 @@
 // @match        *://kinozal.guru/details.php*
 // @connect      dl.kinozal.guru
 // @grant        GM_xmlhttpRequest
-// @grant        GM_download
 // @run-at       document-end
 // @noframes
 // ==/UserScript==
@@ -117,12 +116,6 @@
   const container = links[0].closest('table');
   if (!container || container.dataset.kinozalTorrentCleaner) return;
   container.dataset.kinozalTorrentCleaner = '1';
-  const status = document.createElement('span');
-  status.setAttribute('role', 'status');
-  status.style.cssText = 'display:block;max-width:210px;margin-top:5px;font-size:12px;white-space:normal;color:#245b2b';
-  status.textContent = 'Account key cleanup enabled';
-  links[0].after(status);
-  links[0].title = 'Download without account key';
   let busy = false;
 
   async function download(event) {
@@ -134,11 +127,7 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     if (busy) return;
-    if (!status.isConnected) link.after(status);
     busy = true;
-    link.setAttribute('aria-busy', 'true');
-    status.style.color = '#245b2b';
-    status.textContent = 'Fetching and cleaning file...';
     try {
       const response = await new Promise((resolve, reject) => GM_xmlhttpRequest({
         method: 'GET',
@@ -152,21 +141,22 @@
       }));
       if (response.status !== 200) throw new Error('The server returned HTTP ' + response.status + '. Check that you are signed in.');
       const result = cleanTorrent(response.response);
-      await new Promise((resolve, reject) => GM_download({
-        url: new Blob([result.bytes], { type: 'application/x-bittorrent' }),
-        name: 'bt-id' + url.searchParams.get('id') + '-clean.torrent',
-        saveAs: false,
-        onload: resolve,
-        onerror: () => reject(new Error('File not saved. Enable downloads and allow .torrent in Tampermonkey; version 5.4.6226 or later is required.')),
-        ontimeout: () => reject(new Error('Saving timed out. Try again.'))
-      }));
-      status.textContent = result.removed ? 'Saved without account key' : 'Saved: no uk or passkey found';
+      const objectUrl = URL.createObjectURL(new Blob([result.bytes], { type: 'application/x-bittorrent' }));
+      const save = document.createElement('a');
+      save.href = objectUrl;
+      save.download = 'bt-id' + url.searchParams.get('id') + '-clean.torrent';
+      save.hidden = true;
+      try {
+        document.body.append(save);
+        save.click();
+      } finally {
+        save.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+      }
     } catch (error) {
-      status.style.color = '#a12323';
-      status.textContent = error instanceof Error && !(error instanceof TypeError) ? error.message : 'Could not process the file. Check that you are signed in and update Tampermonkey.';
+      console.error('[BT Passkey Cleaner]', error instanceof Error && !(error instanceof TypeError) ? error.message : 'Could not process the file. Check that you are signed in and update Tampermonkey.');
     } finally {
       busy = false;
-      link.removeAttribute('aria-busy');
     }
   }
   container.addEventListener('click', download, true);
