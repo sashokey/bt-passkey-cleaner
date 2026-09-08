@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         Кинозал — torrent без ключа аккаунта
-// @namespace    kinozal-torrent-cleaner
-// @version      1.0.2
+// @name         BT Passkey Cleaner
+// @namespace    bt-passkey-cleaner
+// @version      1.0.3
 // @homepageURL  https://github.com/sashokey/bt-passkey-cleaner
 // @updateURL    https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
-// @description  Удаляет uk и passkey из адресов трекеров перед сохранением .torrent, сохраняя хеш раздачи.
+// @description  Removes uk and passkey from tracker URLs before saving, preserving the info hash.
 // @match        *://kinozal.guru/details.php*
 // @connect      dl.kinozal.guru
 // @grant        GM_xmlhttpRequest
@@ -18,7 +18,7 @@
   'use strict';
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const encoder = new TextEncoder();
-  const invalid = () => { throw new Error('Некорректный torrent-файл. Проверьте вход в аккаунт и повторите скачивание.'); };
+  const invalid = () => { throw new Error('Invalid BT metadata file. Check that you are signed in and try again.'); };
 
   function decode(bytes) {
     let position = 0;
@@ -104,7 +104,7 @@
     output.set(bytes.subarray(cursor), offset);
     const before = root.value.get('info'), after = decode(output).value.get('info');
     if (before.end - before.start !== after.end - after.start || !bytes.subarray(before.start, before.end).every((byte, index) => byte === output[after.start + index])) {
-      throw new Error('Проверка раздачи не пройдена. Файл не сохранён.');
+      throw new Error('File validation failed. Nothing was saved.');
     }
     return { bytes: output, removed };
   }
@@ -120,9 +120,9 @@
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
   status.style.cssText = 'display:block;max-width:210px;margin-top:5px;font-size:12px;white-space:normal;color:#245b2b';
-  status.textContent = 'Очистка ключа аккаунта включена';
+  status.textContent = 'Account key cleanup enabled';
   links[0].after(status);
-  links[0].title = 'Скачать torrent без ключа аккаунта';
+  links[0].title = 'Download without account key';
   let busy = false;
 
   async function download(event) {
@@ -138,7 +138,7 @@
     busy = true;
     link.setAttribute('aria-busy', 'true');
     status.style.color = '#245b2b';
-    status.textContent = 'Получение и очистка файла…';
+    status.textContent = 'Fetching and cleaning file...';
     try {
       const response = await new Promise((resolve, reject) => GM_xmlhttpRequest({
         method: 'GET',
@@ -146,24 +146,24 @@
         responseType: 'arraybuffer',
         timeout: 30000,
         onload: resolve,
-        onerror: () => reject(new Error('Не удалось получить файл. Проверьте доступ к dl.kinozal.guru.')),
-        ontimeout: () => reject(new Error('Сайт не ответил за 30 секунд. Повторите скачивание.')),
-        onabort: () => reject(new Error('Получение файла отменено.'))
+        onerror: () => reject(new Error('Failed to fetch the file. Check access to the download host.')),
+        ontimeout: () => reject(new Error('The server did not respond within 30 seconds. Try again.')),
+        onabort: () => reject(new Error('Download canceled.'))
       }));
-      if (response.status !== 200) throw new Error('Сайт вернул ошибку HTTP ' + response.status + '. Проверьте вход в аккаунт.');
+      if (response.status !== 200) throw new Error('The server returned HTTP ' + response.status + '. Check that you are signed in.');
       const result = cleanTorrent(response.response);
       await new Promise((resolve, reject) => GM_download({
         url: new Blob([result.bytes], { type: 'application/x-bittorrent' }),
         name: 'bt-id' + url.searchParams.get('id') + '-clean.torrent',
         saveAs: false,
         onload: resolve,
-        onerror: () => reject(new Error('Файл не сохранён. Разрешите скачивания и расширение .torrent в Tampermonkey; нужна версия 5.4.6226 или новее.')),
-        ontimeout: () => reject(new Error('Истекло время сохранения файла. Повторите скачивание.'))
+        onerror: () => reject(new Error('File not saved. Enable downloads and allow .torrent in Tampermonkey; version 5.4.6226 or later is required.')),
+        ontimeout: () => reject(new Error('Saving timed out. Try again.'))
       }));
-      status.textContent = result.removed ? 'Сохранено без ключа аккаунта' : 'Сохранено: uk и passkey отсутствуют';
+      status.textContent = result.removed ? 'Saved without account key' : 'Saved: no uk or passkey found';
     } catch (error) {
       status.style.color = '#a12323';
-      status.textContent = error instanceof Error && !(error instanceof TypeError) ? error.message : 'Не удалось обработать файл. Проверьте вход в аккаунт и обновите Tampermonkey.';
+      status.textContent = error instanceof Error && !(error instanceof TypeError) ? error.message : 'Could not process the file. Check that you are signed in and update Tampermonkey.';
     } finally {
       busy = false;
       link.removeAttribute('aria-busy');
