@@ -1,0 +1,182 @@
+// ==UserScript==
+// @name         BT Passkey Cleaner
+// @namespace    bt-passkey-cleaner
+// @version      1.0.6
+// @homepageURL  https://github.com/sashokey/bt-passkey-cleaner
+// @updateURL    https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
+// @downloadURL  https://raw.githubusercontent.com/sashokey/bt-passkey-cleaner/master/bt-passkey-cleaner.user.js
+// @description  Removes uk and passkey from tracker URLs before saving, preserving the info hash.
+// @match        *://kinozal.guru/details.php*
+// @connect      kinozal.guru
+// @connect      dl.kinozal.guru
+// @grant        GM_xmlhttpRequest
+// @run-at       document-end
+// @noframes
+// ==/UserScript==
+
+(() => {
+  'use strict';
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const encoder = new TextEncoder();
+  const invalid = () => { throw new Error('Invalid BT metadata file. Check that you are signed in and try again.'); };
+
+  function decode(bytes) {
+    let position = 0;
+    function read(depth = 0) {
+      if (depth > 64 || position >= bytes.length) invalid();
+      const start = position, type = bytes[position++];
+      let value;
+      if (type === 100 || type === 108) {
+        value = type === 100 ? new Map() : [];
+        while (bytes[position] !== 101) {
+          if (type === 108) value.push(read(depth + 1));
+          else {
+            const key = read(depth + 1);
+            if (!(key.value instanceof Uint8Array)) invalid();
+            const name = decoder.decode(key.value);
+            if (value.has(name)) invalid();
+            value.set(name, read(depth + 1));
+          }
+        }
+        position++;
+      } else if (type === 105) {
+        const end = bytes.indexOf(101, position);
+        if (end < 0) invalid();
+        value = decoder.decode(bytes.subarray(position, end));
+        if (!/^(0|-?[1-9]\d*)$/.test(value)) invalid();
+        position = end + 1;
+      } else if (type >= 48 && type <= 57) {
+        const colon = bytes.indexOf(58, start);
+        if (colon < 0) invalid();
+        const text = decoder.decode(bytes.subarray(start, colon));
+        if (!/^(0|[1-9]\d*)$/.test(text)) invalid();
+        const length = Number(text);
+        position = colon + 1;
+        if (!Number.isSafeInteger(length) || length > bytes.length - position) invalid();
+        value = bytes.subarray(position, position + length);
+        position += length;
+      } else invalid();
+      return { start, end: position, type, value };
+    }
+    const root = read();
+    if (position !== bytes.length || root.type !== 100 || root.value.get('info')?.type !== 100) invalid();
+    return root;
+  }
+
+  function cleanTorrent(input) {
+    const bytes = new Uint8Array(input), root = decode(bytes), replacements = [];
+    let removed = 0;
+    function clean(node) {
+      if (node.type === 108) { node.value.forEach(clean); return; }
+      if (!(node.value instanceof Uint8Array)) invalid();
+      const url = new URL(decoder.decode(node.value));
+      let changed = false;
+      for (const key of new Set(url.searchParams.keys())) {
+        if (/^(uk|passkey)$/i.test(key)) {
+          removed += url.searchParams.getAll(key).length;
+          url.searchParams.delete(key);
+          changed = true;
+        }
+      }
+      if (changed) {
+        const content = encoder.encode(url.href);
+        replacements.push({ ...node, prefix: encoder.encode(content.length + ':'), content });
+      }
+    }
+    for (const key of ['announce', 'announce-list']) {
+      const node = root.value.get(key);
+      if (node) clean(node);
+    }
+    if (!replacements.length) return { bytes, removed };
+    replacements.sort((a, b) => a.start - b.start);
+    const output = new Uint8Array(bytes.length + replacements.reduce((n, r) => n + r.prefix.length + r.content.length - (r.end - r.start), 0));
+    let cursor = 0, offset = 0;
+    for (const item of replacements) {
+      const unchanged = bytes.subarray(cursor, item.start);
+      output.set(unchanged, offset);
+      offset += unchanged.length;
+      output.set(item.prefix, offset);
+      offset += item.prefix.length;
+      output.set(item.content, offset);
+      offset += item.content.length;
+      cursor = item.end;
+    }
+    output.set(bytes.subarray(cursor), offset);
+    const before = root.value.get('info'), after = decode(output).value.get('info');
+    if (before.end - before.start !== after.end - after.start || !bytes.subarray(before.start, before.end).every((byte, index) => byte === output[after.start + index])) {
+      throw new Error('File validation failed. Nothing was saved.');
+    }
+    return { bytes: output, removed };
+  }
+
+  async function fetchTorrent(url) {
+    if (url.origin === location.origin) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      try {
+        const response = await fetch(url.href, { credentials: 'include', signal: controller.signal });
+        return { status: response.status, response: await response.arrayBuffer() };
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error('The server did not respond within 30 seconds. Try again.');
+        throw new Error('Failed to fetch the file using the current login session. Reload the release page and try again.');
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return new Promise((resolve, reject) => GM_xmlhttpRequest({
+      method: 'GET',
+      url: url.href,
+      responseType: 'arraybuffer',
+      timeout: 30000,
+      onload: resolve,
+      onerror: () => reject(new Error('Failed to fetch the file. Check access to the download host.')),
+      ontimeout: () => reject(new Error('The server did not respond within 30 seconds. Try again.')),
+      onabort: () => reject(new Error('Download canceled.'))
+    }));
+  }
+
+  const links = [...document.querySelectorAll('a[href*="/download.php?"]')].filter(link => {
+    const url = new URL(link.href);
+    return ['kinozal.guru', 'dl.kinozal.guru'].includes(url.hostname) && url.pathname === '/download.php' && /^\d+$/.test(url.searchParams.get('id') || '');
+  });
+  if (links.length !== 1) return;
+  const container = links[0].closest('table');
+  if (!container || container.dataset.kinozalTorrentCleaner) return;
+  container.dataset.kinozalTorrentCleaner = '1';
+  let busy = false;
+
+  async function download(event) {
+    if (event.type === 'auxclick' && event.button !== 1) return;
+    const link = event.target.closest?.('a[href*="/download.php?"]');
+    if (!link || !container.contains(link)) return;
+    const url = new URL(link.href);
+    if (!['kinozal.guru', 'dl.kinozal.guru'].includes(url.hostname) || url.pathname !== '/download.php' || !/^\d+$/.test(url.searchParams.get('id') || '')) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (busy) return;
+    busy = true;
+    try {
+      const response = await fetchTorrent(url);
+      if (response.status !== 200) throw new Error('The server returned HTTP ' + response.status + '. Nothing was saved. Reload the release page and check that ordinary downloads work.');
+      const result = cleanTorrent(response.response);
+      const objectUrl = URL.createObjectURL(new Blob([result.bytes], { type: 'application/x-bittorrent' }));
+      const save = document.createElement('a');
+      save.href = objectUrl;
+      save.download = 'bt-id' + url.searchParams.get('id') + '-clean.torrent';
+      save.hidden = true;
+      try {
+        document.body.append(save);
+        save.click();
+      } finally {
+        save.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+      }
+    } catch (error) {
+      console.error('[BT Passkey Cleaner]', error instanceof Error && !(error instanceof TypeError) ? error.message : 'Could not process the file. Check that you are signed in and update Tampermonkey.');
+    } finally {
+      busy = false;
+    }
+  }
+  container.addEventListener('click', download, true);
+  container.addEventListener('auxclick', download, true);
+})();
